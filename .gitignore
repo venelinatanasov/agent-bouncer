@@ -4,3 +4,8 @@ __pycache__/
 venv/
 *.log
 .env
+secrets/
+hostkeys/
+logs/
+build/
+dist/

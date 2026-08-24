@@ -1,0 +1,35 @@
+# Example config covering both supported device modes.
+devices:
+  # A plain Linux/Unix box: commands arrive as discrete SSH exec requests.
+  - name: example-linux-host
+    listen:
+      host: 127.0.0.1
+      port: 2200
+    remote:
+      host: 192.0.2.10
+      port: 22
+    mode: exec
+    allow:
+      - "uptime"
+      - "df -h"
+      - "systemctl status *"
+      - pattern: "journalctl -u * --no-pager"
+        allow_metachars: false
+    log_file: "logs/example-linux-host.log"
+
+  # A network-appliance CLI (e.g. PAN-OS): only an interactive PTY shell is
+  # available, so commands are gated line-by-line instead of via exec.
+  - name: example-network-appliance
+    listen:
+      host: 127.0.0.1
+      port: 2201
+    remote:
+      host: 192.0.2.20
+      port: 22
+    mode: shell-line
+    init_commands:
+      - "set cli pager off"
+    allow:
+      - "show system info"
+      - "show interface *"
+    log_file: "logs/example-network-appliance.log"
