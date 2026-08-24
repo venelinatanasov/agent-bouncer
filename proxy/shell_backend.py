@@ -261,8 +261,14 @@ class ShellLineSession:
 
     def _handle_enter(self) -> None:
         if self._poison_reason is not None:
-            command = "".join(self._shadow)
-            self._cancel_and_reject(self._poison_reason, command or "<unknown>")
+            command = "".join(self._shadow) or "<unknown>"
+            # Same audit trail as a normal blocked command -- otherwise Tab/"?"
+            # presses, escape sequences, stray control bytes, and overlong
+            # lines leave zero trace in the log, which is exactly the kind of
+            # repeated-probing pattern the audit trail exists to surface (see
+            # USER_MANUAL.md's Logs section).
+            log_command(self.audit_logger, self.peer, self.username, command, False, self._poison_reason)
+            self._cancel_and_reject(self._poison_reason, command)
             return
 
         # Outer spaces carry no security meaning.
