@@ -197,11 +197,22 @@ class ShellLineSession:
             # device act on it (or misreading it as literal characters
             # typed) could desync our shadow from the device's real buffer.
             self._escape_buf += ch
-            if len(self._escape_buf) >= 2 and self._escape_buf[1:2] != b"[":
-                self._escape_buf = b""
-            elif len(self._escape_buf) >= 3 and 0x40 <= b <= 0x7E:
-                self._escape_buf = b""
-            elif len(self._escape_buf) > 16:
+            if self._escape_buf[1:2] == b"[":
+                # CSI: terminates on a byte in the 0x40-0x7E final-byte range.
+                if len(self._escape_buf) >= 3 and 0x40 <= b <= 0x7E:
+                    self._escape_buf = b""
+            else:
+                # Non-CSI (e.g. SS3 "ESC O <char>", sent for F1-F4 / cursor
+                # keys by terminals in application-cursor-keys mode): the
+                # prefix byte is not itself the final byte, so this must
+                # consume a third byte too -- ending it after only two bytes
+                # would let that real final byte fall through untouched on
+                # the next call and be treated (and forwarded/shadowed) as
+                # ordinary literal input, which is exactly what this whole
+                # branch exists to prevent.
+                if len(self._escape_buf) >= 3:
+                    self._escape_buf = b""
+            if len(self._escape_buf) > 16:
                 self._escape_buf = b""
             return
 
