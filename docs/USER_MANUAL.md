@@ -205,8 +205,9 @@ ssh -p 2201 admin@127.0.0.1
 The proxy handles the rest — authenticating downstream, gating commands,
 and relaying output. For `shell-line` devices this works fine for a human
 sitting at a terminal too, not just a scripted agent: you'll see your own
-typing, Tab completion and `?` help both work, and a blocked command tells
-you why without killing the session.
+typing, and a blocked command tells you why without killing the session.
+Tab completion and `?` help are not supported (see Limitations) — using
+either one gets that line refused, on purpose.
 
 ## Logs
 
@@ -238,24 +239,27 @@ This is a rudimentary safeguard, not a hardened security boundary:
   too, pre-seed the pinned key file yourself from an out-of-band-verified
   fingerprint before starting the proxy.
 - `shell-line` mode forwards every keystroke to the device live *except*
-  Enter — that's the one held back and checked. This is what makes normal
-  terminal use work naturally: you see your own typing (the device's own
-  echo), Tab completion and `?` context help both work, and a lone CR
-  (a real terminal's Enter), a lone LF (what a scripted client typically
-  sends), and CRLF are all accepted as "submit this line." If a command is
-  blocked, the device's own pending input is cleared (Ctrl+U) before Enter
-  ever reaches it, so it never runs — you'll see why, and the session stays
-  usable.
-  Do **not** send `set cli scripting-mode on` as an `init_command` on
-  PAN-OS-style devices if you want Tab/`?` to keep working — it's a
-  legitimate way to get quieter, more automation-friendly output, but it
-  also disables both of those features at the device level; there's no way
-  for the proxy to have both at once. Arrow-key editing and other terminal
-  control sequences beyond plain typing/backspace aren't interpreted — a
-  line containing one is rejected as malformed rather than guessed at, and
-  a single line is capped at 4096 bytes (rejected past that, session stays
-  alive) so a runaway or malicious stream can't grow the proxy's memory
-  unbounded.
+  Enter — that's the one held back and checked. What's actually pending is
+  tracked locally as you type (append on a character, remove on backspace),
+  not by reading it back off the device, so this is fast and doesn't depend
+  on the device being responsive. A lone CR (a real terminal's Enter), a
+  lone LF (what a scripted client typically sends), and CRLF are all
+  accepted as "submit this line." If a command is blocked, the device's own
+  pending input is cleared (Ctrl+U) before Enter ever reaches it, so it
+  never runs — you'll see why, and the session stays usable.
+  **Tab completion and `?` help are not supported, on purpose.** Both can
+  change the device's buffer in ways local tracking can't predict, and the
+  only way to know what they actually did is to wait for the device to
+  echo back its new state — which ties correctness to how responsive the
+  device happens to be at that moment, and got unreliable on a loaded
+  device. Rather than a feature that sometimes silently does the wrong
+  thing, pressing Tab or `?` simply does nothing visible and guarantees
+  that line gets refused, every time, regardless of what you typed before
+  or after. Arrow-key editing and other terminal control sequences beyond
+  plain typing/backspace aren't interpreted either, for the same reason —
+  a line containing one is rejected rather than guessed at. A single line
+  is also capped at 4096 bytes (rejected past that, session stays alive)
+  so a runaway or malicious stream can't grow the proxy's memory unbounded.
 - Command matching operates on plain ASCII/printable text; anything with
   non-printable or non-ASCII bytes is rejected outright rather than
   matched, which is a safe default but can surprise you if a legitimate

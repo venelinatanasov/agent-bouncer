@@ -9,22 +9,30 @@ we send Ctrl+U to clear the device's own pending input line (verified
 empirically: it fully erases the line and prevents it from executing) and
 tell the agent why.
 
-The pending command is tracked with simple local keystroke shadowing
-(append on a printable character, pop on backspace) rather than by parsing
-the device's echoed redraws: PAN-OS's redraw conventions turned out to be
-inconsistent (a full "\\r" + reprint for some edits, a bare backspace/space/
-backspace or an ANSI cursor-move+erase for others), which made anchoring on
-raw byte patterns fragile. Local shadowing is deterministic for typing and
-backspace. Tab and "?" are the two keys that can change the buffer in ways
-local shadowing can't predict (completion, unknown-command handling), so
-those two specifically trigger a resync from the device's own echo — and if
-that resync can't be confidently parsed, the line is marked *poisoned*
-rather than left on stale shadow content, so Enter fails closed instead of
-possibly letting the device run something different from what was checked.
-Anything the terminal sends that we don't specifically handle (escape
-sequences, i.e. arrow keys, and other control bytes) also poisons the line
-and is not forwarded at all, rather than risk the device's real buffer
-diverging from what we're tracking.
+The pending command is tracked with simple local keystroke shadowing:
+append on a printable character, pop on backspace. This is fully
+deterministic and needs no information from the device at all.
+
+Tab completion and "?" context help are deliberately NOT supported.
+Both can change the device's own buffer in ways local shadowing can't
+predict, and the only way to know what they actually did is to wait for
+the device to echo back its new state and parse it -- which was tried and
+dropped: PAN-OS's redraw conventions are inconsistent enough (a full "\\r"
++ reprint for some edits, a bare backspace/space/backspace or an ANSI
+cursor-move+erase for others) to make that fragile, and the device can
+have multi-second internal processing pauses that make "has it settled
+yet?" a genuine guess. Getting that guess wrong in either direction is bad:
+trust stale content and Enter can submit something different from what was
+checked, or wait indefinitely and every keystroke gets slower. Rather than
+carry that tradeoff, both keys simply poison the current line (Enter will
+be refused) without being forwarded, so using them is a clear, instant,
+always-consistent "not supported" rather than a sometimes-works guess.
+
+Anything else the terminal sends that isn't plain typing/backspace --
+escape sequences (arrow keys, etc.) and other control bytes -- also
+poisons the line and is not forwarded, for the same reason: forwarding
+something we can't account for risks the device's real buffer diverging
+from what's being tracked.
 """
 from __future__ import annotations
 
@@ -35,13 +43,17 @@ from .allowlist import check_command
 from .audit import log_command
 from .config import DeviceConfig
 
-_TAIL_KEEP = 4096  # bounds memory retained for prompt/resync parsing
+_TAIL_KEEP = 4096  # bounds memory retained for prompt-string parsing
 _MAX_SHADOW_LEN = 4096  # bounds memory for the locally-tracked pending line
 _CANCEL_LINE = b"\x15"  # Ctrl+U: verified against the real device to fully clear
                          # the pending input line and prevent it from executing.
                          # Ctrl+C was tried first and rejected: it did NOT reliably
                          # stop a recognized command from running.
-_RESYNC_KEYS = (0x09, 0x3f)  # Tab, '?' -- can change the buffer unpredictably
+_UNSUPPORTED_KEY_REASON = (
+    "Tab completion and \"?\" help are not supported through this proxy -- "
+    "type the full command and press Enter"
+)
+_UNSUPPORTED_INPUT_REASON = "input contained an unsupported control sequence or byte"
 
 
 def _drain_until_idle(channel, idle_seconds: float = 3.0, max_seconds: float = 30.0) -> bytes:
@@ -88,19 +100,18 @@ class ShellLineSession:
         self._stop = threading.Event()
         self._last_device_activity = time.time()
 
-        # The prompt text as it looked with nothing typed yet for the
-        # in-progress line. Only used to strip the prompt back off when
-        # resyncing from the device's echo after Tab/'?'. Re-derived at the
-        # start of every line that actually reaches the device, so it
-        # tracks a changing prompt correctly (e.g. "admin@PA-VM> " vs
-        # "admin@PA-VM# " after entering config mode).
+        # The prompt text as it looked with nothing typed yet. Only used
+        # cosmetically, to make a rejection message look like a continued
+        # session (see _cancel_and_reject) -- re-derived fresh there each
+        # time, so it tracks a changing prompt correctly (e.g.
+        # "admin@PA-VM> " vs "admin@PA-VM# " after entering config mode)
+        # without needing to be maintained on every keystroke.
         self._prompt_prefix = initial_tail[-_TAIL_KEEP:]
-        self._prompt_locked = False
 
         # Locally-tracked pending command text, built from keystrokes we
         # know how to interpret deterministically (see module docstring).
         self._shadow: list[str] = []
-        self._line_poisoned = False
+        self._poison_reason: str | None = None
         self._escape_buf = b""  # non-empty while mid-escape-sequence
         self._just_saw_cr = False
 
@@ -111,9 +122,10 @@ class ShellLineSession:
 
     def _wait_for_device_quiet(self, idle_seconds: float = 0.3, max_seconds: float = 20.0) -> None:
         """Passive wait only -- never touches device_channel directly, so it
-        can't race the pump thread's recv() calls. Used before making a
-        security decision (at Enter, after a cancel, and before a Tab/'?'
-        resync) so we're not reading a mid-redraw snapshot of the echo."""
+        can't race the pump thread's recv() calls. Used only when cancelling
+        a blocked line, so the device's erase-echo reaches the agent before
+        our own rejection message, and so the freshly-read prompt reflects
+        the device's actual current state rather than a mid-redraw snapshot."""
         start = time.time()
         while time.time() - start < max_seconds:
             if time.time() - self._last_device_activity >= idle_seconds:
@@ -125,24 +137,6 @@ class ShellLineSession:
             tail = self._tail
         idx = tail.rfind(b"\n")
         return tail if idx == -1 else tail[idx + 1:]
-
-    def _extract_from_device_echo(self) -> str | None:
-        """Best-effort read of the device's own idea of the current line.
-        Used only right after Tab/'?', since those can change the buffer
-        beyond what local keystroke shadowing predicts. Returns None if it
-        can't be confidently parsed -- the caller must treat that as
-        untrustworthy and fail closed rather than fall back to stale shadow
-        content, since the device's real buffer may have already changed."""
-        tail = self._tail_since_last_lf()
-        idx = tail.rfind(b"\r")
-        frame = tail[idx + 1:] if idx != -1 else tail
-        if frame.startswith(b"\x1b[K"):
-            frame = frame[3:]
-        frame = frame.lstrip(b"\x00")
-        if not frame.startswith(self._prompt_prefix):
-            return None
-        content = frame[len(self._prompt_prefix):]
-        return content.decode("utf-8", errors="replace")
 
     def _device_to_agent_pump(self) -> None:
         while not self._stop.is_set():
@@ -217,30 +211,12 @@ class ShellLineSession:
                 self._just_saw_cr = False
                 return
             self._just_saw_cr = ch == b"\r"
-            if self._handle_enter():
-                # Command actually ran -- the prompt may now be different
-                # (e.g. after entering config mode), so re-derive it fresh
-                # for the next line.
-                self._prompt_locked = False
+            self._handle_enter()
             self._shadow = []
-            self._line_poisoned = False
+            self._poison_reason = None
             return
 
         self._just_saw_cr = False
-
-        if not self._prompt_locked:
-            # First byte of a new line: freeze what the prompt looks like
-            # *before* this byte is forwarded, for use if Tab/'?' need a
-            # resync later in this line. Use a longer idle threshold than
-            # the default: this is waiting for the *previous* command's
-            # output to fully finish, and PAN-OS has a real multi-second
-            # internal processing pause mid-response -- a short gap here
-            # can look like "done" while output is still about to arrive,
-            # freezing an empty/wrong prefix that corrupts any later
-            # resync on this line.
-            self._wait_for_device_quiet(idle_seconds=3.0, max_seconds=30.0)
-            self._prompt_prefix = self._tail_since_last_lf()
-            self._prompt_locked = True
 
         if ch in (b"\x7f", b"\x08"):  # backspace/DEL
             if self._shadow:
@@ -248,56 +224,35 @@ class ShellLineSession:
             self._forward(ch)
             return
 
-        if b in _RESYNC_KEYS:  # Tab, '?': device may change the buffer unpredictably
-            had_content_before = bool(self._shadow)
-            self._forward(ch)
-            # '?' can produce a very large help dump; a short idle gap
-            # partway through (or just before the final line's trailing
-            # reprint) can look like "done" too early. Wait longer here
-            # than the default before trusting the echo.
-            self._wait_for_device_quiet(idle_seconds=2.0, max_seconds=25.0)
-            resynced = self._extract_from_device_echo()
-            # A resync that comes back empty right after we had real
-            # content is a stronger signal of "settled too early" than
-            # "the device actually erased everything" -- neither Tab nor
-            # '?' should ever remove prior text. Don't silently accept an
-            # answer that implies the buffer changed in a way it shouldn't.
-            if resynced is None or (had_content_before and resynced == ""):
-                self._line_poisoned = True
-            else:
-                self._shadow = list(resynced)
-            return
+        if b in (0x09, 0x3f):  # Tab, '?': not supported -- see module docstring
+            self._poison_reason = _UNSUPPORTED_KEY_REASON
+            return  # not forwarded: pressing it visibly does nothing
 
         if ch == b"\x1b":
             self._escape_buf = ch
-            self._line_poisoned = True
+            self._poison_reason = _UNSUPPORTED_INPUT_REASON
             return
 
         if 0x20 <= b <= 0x7E:  # other printable ASCII
             if len(self._shadow) >= _MAX_SHADOW_LEN:
-                self._line_poisoned = True
-            else:
-                self._shadow.append(chr(b))
+                # Already doomed to be rejected -- stop forwarding too, so a
+                # deliberate flood can't keep growing the device's own
+                # buffer unbounded once we've detected it.
+                self._poison_reason = "command too long"
+                return
+            self._shadow.append(chr(b))
             self._forward(ch)
             return
 
         # Any other control byte or high-bit byte: don't trust it, don't
         # forward it, fail the line closed at Enter.
-        self._line_poisoned = True
+        self._poison_reason = _UNSUPPORTED_INPUT_REASON
 
-    def _handle_enter(self) -> bool:
-        """Returns True if a real Enter was forwarded to the device (the
-        prompt may now differ and should be re-derived for the next line),
-        False if the line was cancelled (the device never saw it, so its
-        prompt is unchanged -- don't re-freeze from the cancel's own echo)."""
-        if self._line_poisoned:
+    def _handle_enter(self) -> None:
+        if self._poison_reason is not None:
             command = "".join(self._shadow)
-            self._cancel_and_reject(
-                "input contained an unsupported control sequence, or a Tab/'?' "
-                "completion could not be verified against the device's echo",
-                command or "<unknown>",
-            )
-            return False
+            self._cancel_and_reject(self._poison_reason, command or "<unknown>")
+            return
 
         # Outer spaces carry no security meaning.
         command = "".join(self._shadow).strip(" ")
@@ -308,7 +263,7 @@ class ShellLineSession:
                 self.device_channel.sendall(b"\r")
             except Exception:
                 self._stop.set()
-            return True
+            return
 
         allowed, reason = check_command(command, self.device_cfg.allow, self.device_cfg.mode)
         log_command(self.audit_logger, self.peer, self.username, command, allowed, reason)
@@ -318,10 +273,9 @@ class ShellLineSession:
                 self.device_channel.sendall(b"\r")
             except Exception:
                 self._stop.set()
-            return True
+            return
 
         self._cancel_and_reject(reason, command)
-        return False
 
     def _cancel_and_reject(self, reason: str, command: str) -> None:
         try:
@@ -330,6 +284,10 @@ class ShellLineSession:
             self._stop.set()
             return
         self._wait_for_device_quiet()  # let the device's erase-echo reach the agent first
+        # Re-derive the prompt now rather than relying on a value frozen
+        # earlier: it may have changed (e.g. after entering config mode via
+        # a legitimately allowed command earlier in the session).
+        self._prompt_prefix = self._tail_since_last_lf()
         message = (
             command.encode("utf-8", errors="replace")
             + b"\r\n*** blocked by proxy policy: "
