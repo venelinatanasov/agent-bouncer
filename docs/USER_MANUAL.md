@@ -1,8 +1,8 @@
-# ssh-proxy-guard — User Manual
+# agent-bouncer — User Manual
 
 ## What this is
 
-ssh-proxy-guard sits between an AI agent and a real device's SSH server. The
+agent-bouncer sits between an AI agent and a real device's SSH server. The
 agent never talks to the device directly — it talks to this proxy, which
 authenticates to the real device with the agent's own credentials and then
 only lets through commands that appear on an allowlist you control. Anything
@@ -15,7 +15,7 @@ file. You are the only thing that can change it.
 ## How it works
 
 ```
-AI agent  --SSH-->  ssh-proxy-guard  --SSH-->  real device
+AI agent  --SSH-->  agent-bouncer  --SSH-->  real device
                      (checks each
                       command against
                       the allowlist)
@@ -28,12 +28,12 @@ filtered — only what runs is gated, not what comes back.
 
 ## Installing
 
-**Option A — the compiled executable.** Download `ssh-proxy-guard.exe` from
+**Option A — the compiled executable.** Download `agent-bouncer.exe` from
 the project's GitHub Releases page. No Python installation needed. Run it
 from a terminal:
 
 ```
-ssh-proxy-guard.exe --config config\mydevice.yaml
+agent-bouncer.exe --config config\mydevice.yaml
 ```
 
 **Option B — from source.**
@@ -48,10 +48,10 @@ python -m venv .venv
 
 ```
 .venv\Scripts\pip install pyinstaller
-.venv\Scripts\python.exe -m PyInstaller --onefile --name ssh-proxy-guard run_proxy.py
+.venv\Scripts\python.exe -m PyInstaller --onefile --name agent-bouncer run_proxy.py
 ```
 
-The result lands in `dist\ssh-proxy-guard.exe`.
+The result lands in `dist\agent-bouncer.exe`.
 
 ## The two device modes
 

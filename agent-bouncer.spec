@@ -22,7 +22,7 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name='ssh-proxy-guard',
+    name='agent-bouncer',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

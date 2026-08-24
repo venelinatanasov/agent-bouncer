@@ -11,7 +11,7 @@ def get_audit_logger(device_name: str, log_file: str | None) -> logging.Logger:
     if device_name in _loggers:
         return _loggers[device_name]
 
-    logger = logging.getLogger(f"ssh_proxy_guard.audit.{device_name}")
+    logger = logging.getLogger(f"agent_bouncer.audit.{device_name}")
     logger.setLevel(logging.INFO)
     logger.propagate = False
 

@@ -1,4 +1,4 @@
-"""Config loading for ssh-proxy-guard.
+"""Config loading for agent-bouncer.
 
 The allowlist is data the human owns. This module only *reads* it; nothing
 in the runtime path is able to write back to it.

@@ -8,7 +8,7 @@ from .server import run
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="ssh-proxy-guard: allowlisted SSH proxy for AI agents")
+    parser = argparse.ArgumentParser(description="agent-bouncer: allowlisted SSH proxy for AI agents")
     parser.add_argument("--config", required=True, help="path to the YAML config file")
     args = parser.parse_args()
 
