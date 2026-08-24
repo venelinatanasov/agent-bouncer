@@ -313,12 +313,24 @@ class ShellLineSession:
 
 
 def handle_shell(agent_channel, device_cfg: DeviceConfig, downstream_client, audit_logger, peer: str, username: str, term: str, width: int, height: int) -> None:
-    transport = downstream_client.get_transport()
-    device_channel = transport.open_session(timeout=device_cfg.connect_timeout)
-    device_channel.get_pty(term=term or "vt100", width=width or 200, height=height or 1000)
-    device_channel.invoke_shell()
-
-    initial_tail = run_init_sequence(device_channel, device_cfg.init_commands)
+    try:
+        transport = downstream_client.get_transport()
+        if transport is None:
+            raise OSError("downstream connection is no longer available")
+        device_channel = transport.open_session(timeout=device_cfg.connect_timeout)
+        device_channel.get_pty(term=term or "vt100", width=width or 200, height=height or 1000)
+        device_channel.invoke_shell()
+        initial_tail = run_init_sequence(device_channel, device_cfg.init_commands)
+    except Exception as exc:
+        try:
+            agent_channel.sendall(f"\r\nproxy: failed to start shell on device: {exc}\r\n".encode())
+        except Exception:
+            pass
+        try:
+            agent_channel.close()
+        except Exception:
+            pass
+        return
 
     session = ShellLineSession(
         agent_channel=agent_channel,

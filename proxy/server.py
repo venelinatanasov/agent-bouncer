@@ -58,6 +58,20 @@ class DeviceServerInterface(paramiko.ServerInterface):
         self.username: str | None = None
         self.downstream_client: paramiko.SSHClient | None = None
         self._pty: tuple[str, int, int] | None = None
+        # Every exec/shell handler thread we spawn, so _handle_connection can
+        # wait for them before closing downstream_client -- otherwise, if the
+        # agent disconnects fast enough after requesting a channel, the close
+        # can land before a still-starting (_CHANNEL_REQUEST_ACK_GRACE-
+        # delayed) handler ever gets to use it. Only ever appended to from
+        # paramiko's own transport thread (one at a time, never concurrent
+        # with itself), and only ever read after transport.join() confirms
+        # that thread is done, so no lock is needed.
+        self._handler_threads: list[threading.Thread] = []
+
+    def _spawn_handler(self, target, args) -> None:
+        thread = threading.Thread(target=_after_ack(target, args), daemon=True)
+        self._handler_threads.append(thread)
+        thread.start()
 
     # --- auth ---
 
@@ -134,13 +148,10 @@ class DeviceServerInterface(paramiko.ServerInterface):
         if self.device_cfg.mode != "exec":
             return False
         command_str = command.decode("utf-8", errors="replace")
-        threading.Thread(
-            target=_after_ack(
-                handle_exec,
-                (channel, self.device_cfg, self.downstream_client, command_str, self.audit_logger, self.peer, self.username),
-            ),
-            daemon=True,
-        ).start()
+        self._spawn_handler(
+            handle_exec,
+            (channel, self.device_cfg, self.downstream_client, command_str, self.audit_logger, self.peer, self.username),
+        )
         return True
 
     def check_channel_pty_request(self, channel, term, width, height, pixelwidth, pixelheight, modes):
@@ -154,13 +165,10 @@ class DeviceServerInterface(paramiko.ServerInterface):
         if self.device_cfg.mode != "shell-line":
             return False
         term, width, height = self._pty or ("vt100", 200, 1000)
-        threading.Thread(
-            target=_after_ack(
-                handle_shell,
-                (channel, self.device_cfg, self.downstream_client, self.audit_logger, self.peer, self.username, term, width, height),
-            ),
-            daemon=True,
-        ).start()
+        self._spawn_handler(
+            handle_shell,
+            (channel, self.device_cfg, self.downstream_client, self.audit_logger, self.peer, self.username, term, width, height),
+        )
         return True
 
     # --- everything else: refused ---
@@ -215,6 +223,9 @@ def _handle_connection(client_sock: socket.socket, addr, device_cfg: DeviceConfi
 
     transport.join()
     del channel
+
+    for handler_thread in server._handler_threads:
+        handler_thread.join(timeout=30)
 
     if server.downstream_client is not None:
         try:
