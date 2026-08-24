@@ -8,9 +8,10 @@ devices:
       port: 22
     mode: shell-line
     # Session-preference commands, not config changes — safe to run automatically.
+    # Deliberately NOT setting "scripting-mode on": it suppresses Tab
+    # completion and "?" help, which we want to keep working interactively.
     init_commands:
       - "set cli pager off"
-      - "set cli scripting-mode on"
     allow:
       - "show system info"
       - "show clock"

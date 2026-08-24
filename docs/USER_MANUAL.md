@@ -203,7 +203,10 @@ ssh -p 2201 admin@127.0.0.1
 ```
 
 The proxy handles the rest — authenticating downstream, gating commands,
-and relaying output.
+and relaying output. For `shell-line` devices this works fine for a human
+sitting at a terminal too, not just a scripted agent: you'll see your own
+typing, Tab completion and `?` help both work, and a blocked command tells
+you why without killing the session.
 
 ## Logs
 
@@ -234,19 +237,25 @@ This is a rudimentary safeguard, not a hardened security boundary:
   is trust-on-first-use — if you need a guarantee on that first connection
   too, pre-seed the pinned key file yourself from an out-of-band-verified
   fingerprint before starting the proxy.
-- `shell-line` mode's "one command per newline" model treats a lone CR
-  (what a real terminal sends on Enter), a lone LF (what a scripted client
-  typically sends), and CRLF all as a valid end-of-command marker, so both
-  a human typing through a normal SSH client and an agent's SSH library
-  work. What it does *not* implement is a real terminal line-editor —
-  there's no local echo as you type (you'll see nothing until you press
-  Enter, at which point the device's own echo plus its real output appear
-  together), and backspace/arrow-key editing mid-line isn't interpreted;
-  anything that looks like keystroke-level editing control codes is
-  rejected as malformed input rather than guessed at. A single line is
-  also capped at 4096 bytes without a line ending (rejected past that,
-  session stays alive) so a runaway or malicious stream can't grow the
-  proxy's memory unbounded.
+- `shell-line` mode forwards every keystroke to the device live *except*
+  Enter — that's the one held back and checked. This is what makes normal
+  terminal use work naturally: you see your own typing (the device's own
+  echo), Tab completion and `?` context help both work, and a lone CR
+  (a real terminal's Enter), a lone LF (what a scripted client typically
+  sends), and CRLF are all accepted as "submit this line." If a command is
+  blocked, the device's own pending input is cleared (Ctrl+U) before Enter
+  ever reaches it, so it never runs — you'll see why, and the session stays
+  usable.
+  Do **not** send `set cli scripting-mode on` as an `init_command` on
+  PAN-OS-style devices if you want Tab/`?` to keep working — it's a
+  legitimate way to get quieter, more automation-friendly output, but it
+  also disables both of those features at the device level; there's no way
+  for the proxy to have both at once. Arrow-key editing and other terminal
+  control sequences beyond plain typing/backspace aren't interpreted — a
+  line containing one is rejected as malformed rather than guessed at, and
+  a single line is capped at 4096 bytes (rejected past that, session stays
+  alive) so a runaway or malicious stream can't grow the proxy's memory
+  unbounded.
 - Command matching operates on plain ASCII/printable text; anything with
   non-printable or non-ASCII bytes is rejected outright rather than
   matched, which is a safe default but can surprise you if a legitimate
