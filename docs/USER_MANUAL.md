@@ -178,6 +178,30 @@ and write the pinned file yourself before ever starting the proxy against
 that device — the format is one line, `<remote-host> <key-type> <base64-key>`,
 the same as an OpenSSH `known_hosts` entry.
 
+### Legacy devices and `allow_legacy_kex`
+
+Some older network gear — older Cisco IOS is the common case — only offers
+key-exchange algorithms (`diffie-hellman-group14-sha1`,
+`diffie-hellman-group-exchange-sha1`) that the underlying SSH library has
+removed for being SHA-1 based. Connecting to one of these without special
+handling fails before authentication is even attempted, with an error like
+`Incompatible ssh peer (no acceptable kex algorithm)` — logged as a generic
+downstream auth failure, which can look confusingly like a bad password.
+
+If you hit this, add `allow_legacy_kex: true` to that device's entry:
+
+```yaml
+    remote:
+      host: 203.0.113.2
+      port: 22
+    allow_legacy_kex: true   # only for devices that genuinely can't speak anything newer
+```
+
+This weakens only the proxy's connection to *that one device* — every other
+device, and the agent-facing side of the proxy, is unaffected. It's off by
+default; only turn it on for a device you've confirmed needs it (the
+"Incompatible ssh peer" error above is the tell).
+
 ## Building the allowlist — using AI to draft it
 
 Writing a good allowlist by hand means knowing the target device's full

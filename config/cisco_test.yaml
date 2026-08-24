@@ -1,0 +1,45 @@
+devices:
+  - name: cisco-test
+    listen:
+      host: 127.0.0.1
+      port: 2202
+    remote:
+      host: 203.0.113.2
+      port: 22
+    # Not verified live against this device (no credentials on hand yet) --
+    # defaulting to shell-line since Cisco IOS/IOS-XE, like PAN-OS, doesn't
+    # reliably support the SSH "exec" mechanism for one-shot commands, only
+    # an interactive CLI shell. Confirm this once you can test it: if exec
+    # turns out to work here, switch to mode: exec instead (see
+    # docs/USER_MANUAL.md's "The two device modes" section for how to tell
+    # the difference in practice).
+    mode: shell-line
+    # This device only offers diffie-hellman-group14-sha1 /
+    # diffie-hellman-group-exchange-sha1 for key exchange, both of which
+    # paramiko removed outright (not just deprioritized) for being SHA-1
+    # based. Without this, every connection attempt fails before
+    # authentication is even tried ("Incompatible ssh peer (no acceptable
+    # kex algorithm)"), which can look like a credentials problem in the
+    # logs -- it isn't. See proxy/legacy_kex.py for what this actually
+    # enables and why it's safe: it only weakens the proxy's own
+    # connection to this one device, nothing else. Only set this to true
+    # for devices that genuinely can't speak anything newer.
+    allow_legacy_kex: true
+    # Session-preference command, not a config change -- safe to run
+    # automatically. "terminal length 0" disables the "--More--" pager on
+    # IOS/IOS-XE; some Cisco platforms use different syntax (e.g. certain
+    # NX-OS/ASA variants), so double check this is right for the actual
+    # device/software version once you can log in and confirm.
+    init_commands:
+      - "terminal length 0"
+    allow:
+      - "show version"              # device/software info
+      - "show clock"                # current time
+      - "show ip interface brief"   # quick interface status summary
+      - "show interfaces"           # full interface details, all interfaces
+      - "show arp"                  # ARP table
+      # Generic CLI convention, not Cisco-specific -- see
+      # config/paloalto_test.yaml for the reasoning on why this is
+      # recommended for shell-line devices generally.
+      - "exit"
+    log_file: "logs/cisco-test.log"

@@ -18,7 +18,15 @@ import paramiko
 from .audit import get_audit_logger, log_auth
 from .config import DeviceConfig
 from .exec_backend import handle_exec
+from .legacy_kex import enable_for as enable_legacy_kex
 from .shell_backend import handle_shell
+
+
+def _host_key_lookup_name(host: str, port: int) -> str:
+    # Matches paramiko.SSHClient's own convention exactly, so files pinned
+    # before/without legacy-KEX support (or by a different code path) still
+    # load correctly: bracket-notation only kicks in for a non-default port.
+    return host if port == 22 else f"[{host}]:{port}"
 
 
 # paramiko sends the CHANNEL_SUCCESS reply for a channel request (exec/shell)
@@ -85,57 +93,93 @@ class DeviceServerInterface(paramiko.ServerInterface):
         return paramiko.AUTH_FAILED
 
     def check_auth_password(self, username, password):
-        client = paramiko.SSHClient()
         pinned_path = _pinned_host_key_path(self.device_cfg)
         first_trust = not os.path.exists(pinned_path)
+        lookup_name = _host_key_lookup_name(self.device_cfg.remote_host, self.device_cfg.remote_port)
 
-        if first_trust:
-            # Trust-on-first-use: nothing pinned yet for this device, so accept
-            # whatever key it presents this one time, then pin it below.
-            client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        else:
+        expected_key = None
+        if not first_trust:
             # Every subsequent connection must present exactly the pinned key.
-            # No missing_host_key_policy is set, so paramiko's default
-            # (RejectPolicy) refuses anything not already loaded here.
-            client.load_host_keys(pinned_path)
+            pinned = paramiko.HostKeys(pinned_path)
+            entries = pinned.lookup(lookup_name)
+            if entries:
+                expected_key = next(iter(entries.values()))
 
+        # Built manually (rather than via SSHClient.connect()) because
+        # enabling legacy KEX support requires touching this specific
+        # Transport's security options before the handshake starts, which
+        # SSHClient's connect() doesn't expose a hook for.
+        sock = None
+        transport = None
+        remote_key = None
         try:
-            client.connect(
-                self.device_cfg.remote_host,
-                port=self.device_cfg.remote_port,
-                username=username,
-                password=password,
+            sock = socket.create_connection(
+                (self.device_cfg.remote_host, self.device_cfg.remote_port),
                 timeout=self.device_cfg.connect_timeout,
-                banner_timeout=self.device_cfg.connect_timeout,
-                auth_timeout=self.device_cfg.connect_timeout,
-                look_for_keys=False,
-                allow_agent=False,
             )
+            transport = paramiko.Transport(sock)
+            transport.banner_timeout = self.device_cfg.connect_timeout
+            transport.auth_timeout = self.device_cfg.connect_timeout
+            if self.device_cfg.allow_legacy_kex:
+                enable_legacy_kex(transport)
+            transport.start_client(timeout=self.device_cfg.connect_timeout)
+
+            remote_key = transport.get_remote_server_key()
+            if expected_key is not None and (
+                remote_key.get_name() != expected_key.get_name()
+                or remote_key.asbytes() != expected_key.asbytes()
+            ):
+                raise paramiko.BadHostKeyException(self.device_cfg.remote_host, remote_key, expected_key)
+
+            transport.auth_password(username, password)
         except paramiko.AuthenticationException as exc:
             log_auth(self.audit_logger, self.peer, username, False, f"downstream rejected credentials: {exc}")
+            self._close_quietly(transport, sock)
             return paramiko.AUTH_FAILED
         except paramiko.SSHException as exc:
             # Covers host key mismatches (paramiko.BadHostKeyException is a
-            # subclass of this) as well as other protocol-level failures.
+            # subclass of this) as well as other protocol-level failures,
+            # including "no acceptable kex algorithm" for devices that need
+            # allow_legacy_kex and don't have it set.
             log_auth(self.audit_logger, self.peer, username, False, f"downstream host key rejected or protocol error: {exc}")
+            self._close_quietly(transport, sock)
             return paramiko.AUTH_FAILED
         except Exception as exc:
             log_auth(self.audit_logger, self.peer, username, False, f"downstream unreachable/error: {exc}")
+            self._close_quietly(transport, sock)
             return paramiko.AUTH_FAILED
 
         if first_trust:
             os.makedirs(os.path.dirname(pinned_path), exist_ok=True)
-            client.save_host_keys(pinned_path)
+            pinned = paramiko.HostKeys()
+            pinned.add(lookup_name, remote_key.get_name(), remote_key)
+            pinned.save(pinned_path)
             self.audit_logger.warning(
                 "TRUST ESTABLISHED: pinned host key for device=%s (%s:%d) on first connection -- "
                 "verify this out-of-band if you have any doubt, then delete %s to re-pin if it's wrong",
                 self.device_cfg.name, self.device_cfg.remote_host, self.device_cfg.remote_port, pinned_path,
             )
 
+        # Wrapped in an SSHClient so the rest of the codebase (exec_backend,
+        # shell_backend) keeps working against the same downstream_client
+        # API regardless of which path built the underlying transport.
+        client = paramiko.SSHClient()
+        client._transport = transport
+
         self.username = username
         self.downstream_client = client
         log_auth(self.audit_logger, self.peer, username, True)
         return paramiko.AUTH_SUCCESSFUL
+
+    @staticmethod
+    def _close_quietly(transport, sock) -> None:
+        try:
+            if transport is not None:
+                transport.close()
+            elif sock is not None:
+                sock.close()
+        except Exception:
+            pass
 
     # --- channel setup ---
 

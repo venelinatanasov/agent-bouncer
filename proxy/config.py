@@ -29,6 +29,10 @@ class DeviceConfig:
     init_commands: list[str] = field(default_factory=list)
     log_file: str | None = None
     connect_timeout: float = 10.0
+    # Off by default: only for devices that genuinely can't speak anything
+    # newer (older Cisco IOS is the common case) -- see proxy/legacy_kex.py.
+    # Weakens only the proxy's connection to *this* device, nothing else.
+    allow_legacy_kex: bool = False
 
 
 def _parse_allow_entry(entry) -> AllowRule:
@@ -68,6 +72,7 @@ def _parse_device(raw: dict) -> DeviceConfig:
         init_commands=list(init_commands),
         log_file=raw.get("log_file"),
         connect_timeout=float(raw.get("connect_timeout", 10.0)),
+        allow_legacy_kex=bool(raw.get("allow_legacy_kex", False)),
     )
 
 
