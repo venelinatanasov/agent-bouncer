@@ -109,11 +109,24 @@ class ShellLineSession:
                 if not data:
                     break
                 buffer.extend(data)
-                while b"\n" in buffer:
-                    idx = buffer.index(b"\n")
+                while True:
+                    idx_n = buffer.find(b"\n")
+                    idx_r = buffer.find(b"\r")
+                    candidates = [i for i in (idx_n, idx_r) if i != -1]
+                    if not candidates:
+                        break
+                    idx = min(candidates)
                     raw_line = bytes(buffer[:idx])
-                    del buffer[: idx + 1]
-                    self._handle_line(raw_line)
+                    # A lone CR, a lone LF, and a CRLF pair are all "Enter" —
+                    # real interactive terminals send CR, scripted clients
+                    # typically send LF; treat CRLF as one terminator so a
+                    # CRLF-sending client doesn't leave a stray empty line.
+                    if buffer[idx:idx + 1] == b"\r" and buffer[idx + 1:idx + 2] == b"\n":
+                        del buffer[: idx + 2]
+                    else:
+                        del buffer[: idx + 1]
+                    if raw_line:  # pressing Enter on an empty line is a no-op, not a command
+                        self._handle_line(raw_line)
                 if len(buffer) > _MAX_LINE_LENGTH:
                     self._reject_overlong_buffer(len(buffer))
                     buffer.clear()
