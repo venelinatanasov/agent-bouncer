@@ -32,4 +32,9 @@ devices:
     allow:
       - "show system info"
       - "show interface *"
+      # Generic CLI convention (not vendor-specific) for ending a session --
+      # recommended for shell-line devices generally, so a well-behaved
+      # agent can leave cleanly instead of being forced into an abrupt
+      # disconnect. See config/paloalto_test.yaml for the reasoning in full.
+      - "exit"
     log_file: "logs/example-network-appliance.log"

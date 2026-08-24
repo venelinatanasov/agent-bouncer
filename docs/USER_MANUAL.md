@@ -96,11 +96,22 @@ devices:
       - "show interface *"          # glob — matches any argument after it
       - pattern: "journalctl -u * --no-pager"
         allow_metachars: false      # default; see "Guarded characters" below
+      - "exit"                      # see note below
     log_file: "logs/my-firewall.log"
 ```
 
 Run one proxy process pointed at a config with as many devices as you like —
 each gets its own listener, its own allowlist, its own log file.
+
+**For `shell-line` devices, consider allowing `exit`.** It's a generic CLI
+convention (not specific to any one vendor) that just ends the session —
+it doesn't perform any state-changing action. Without it, a well-behaved
+agent that wants to leave cleanly has no way to do so and is forced into
+an abrupt disconnect instead. It's not a magic fix for anything else —
+testing against a real device found no evidence it makes the device clean
+up its own session bookkeeping any faster than an abrupt disconnect does
+— but giving agents a graceful way to end a session is worth it on its
+own.
 
 ### Allowlist patterns
 

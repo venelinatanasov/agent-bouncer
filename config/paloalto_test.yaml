@@ -20,4 +20,17 @@ devices:
       - "show interface *"
       - "show arp all"
       - "show session info"
+      # "exit" is a generic CLI convention, not Palo Alto-specific -- most
+      # network-appliance CLIs (Cisco, Juniper, etc.) use the same command
+      # to end a session. Recommended to keep allowed: without it, an
+      # agent that wants to leave cleanly has no way to do so and is
+      # forced into an abrupt disconnect instead, which is exactly the
+      # pattern that triggered a real proxy crash (fixed in v0.4.2) --
+      # allowing it removes that pressure entirely, since a well-behaved
+      # client now has a graceful way to end the session. Tested whether
+      # it also clears the device's own stale-session bookkeeping faster
+      # than an abrupt disconnect (`show admins` on this device) and found
+      # no measurable difference -- both showed up as a lingering session
+      # afterward, so don't allow it expecting that benefit specifically.
+      - "exit"
     log_file: "logs/paloalto-test.log"
