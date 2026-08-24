@@ -37,6 +37,10 @@ from .shell_backend import handle_shell
 _CHANNEL_REQUEST_ACK_GRACE = 0.1
 
 
+def _pinned_host_key_path(device_cfg: DeviceConfig) -> str:
+    return os.path.join("hostkeys", "downstream", f"{device_cfg.name}.known_host")
+
+
 def _after_ack(target, args):
     def _run():
         time.sleep(_CHANNEL_REQUEST_ACK_GRACE)
@@ -68,7 +72,19 @@ class DeviceServerInterface(paramiko.ServerInterface):
 
     def check_auth_password(self, username, password):
         client = paramiko.SSHClient()
-        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        pinned_path = _pinned_host_key_path(self.device_cfg)
+        first_trust = not os.path.exists(pinned_path)
+
+        if first_trust:
+            # Trust-on-first-use: nothing pinned yet for this device, so accept
+            # whatever key it presents this one time, then pin it below.
+            client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        else:
+            # Every subsequent connection must present exactly the pinned key.
+            # No missing_host_key_policy is set, so paramiko's default
+            # (RejectPolicy) refuses anything not already loaded here.
+            client.load_host_keys(pinned_path)
+
         try:
             client.connect(
                 self.device_cfg.remote_host,
@@ -84,9 +100,23 @@ class DeviceServerInterface(paramiko.ServerInterface):
         except paramiko.AuthenticationException as exc:
             log_auth(self.audit_logger, self.peer, username, False, f"downstream rejected credentials: {exc}")
             return paramiko.AUTH_FAILED
+        except paramiko.SSHException as exc:
+            # Covers host key mismatches (paramiko.BadHostKeyException is a
+            # subclass of this) as well as other protocol-level failures.
+            log_auth(self.audit_logger, self.peer, username, False, f"downstream host key rejected or protocol error: {exc}")
+            return paramiko.AUTH_FAILED
         except Exception as exc:
             log_auth(self.audit_logger, self.peer, username, False, f"downstream unreachable/error: {exc}")
             return paramiko.AUTH_FAILED
+
+        if first_trust:
+            os.makedirs(os.path.dirname(pinned_path), exist_ok=True)
+            client.save_host_keys(pinned_path)
+            self.audit_logger.warning(
+                "TRUST ESTABLISHED: pinned host key for device=%s (%s:%d) on first connection -- "
+                "verify this out-of-band if you have any doubt, then delete %s to re-pin if it's wrong",
+                self.device_cfg.name, self.device_cfg.remote_host, self.device_cfg.remote_port, pinned_path,
+            )
 
         self.username = username
         self.downstream_client = client

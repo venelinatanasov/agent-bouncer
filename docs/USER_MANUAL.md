@@ -148,6 +148,25 @@ is no separate lockout logic in the proxy — the real device's own account
 lockout policy is what governs, exactly as if the agent had connected to it
 directly.
 
+### Downstream host-key pinning
+
+The proxy verifies the real device's identity, not just its own. The first
+time it ever connects to a given device, it trusts whatever SSH host key
+that device presents and pins it to `hostkeys/downstream/<device-name>.known_host`,
+logging a `TRUST ESTABLISHED` line so you notice. Every connection after
+that must present exactly that same key — if it doesn't (a swapped device,
+a misconfigured IP now pointing somewhere else, or someone actively
+intercepting the connection), the login is refused and logged clearly,
+exactly like a bad password would be.
+
+If a device's key legitimately changes (e.g. after a reinstall), delete its
+pinned file and the next connection will re-establish trust the same way
+the first one did. If you want zero exposure even on that very first
+connection, verify the device's host key fingerprint out-of-band beforehand
+and write the pinned file yourself before ever starting the proxy against
+that device — the format is one line, `<remote-host> <key-type> <base64-key>`,
+the same as an OpenSSH `known_hosts` entry.
+
 ## Building the allowlist — using AI to draft it
 
 Writing a good allowlist by hand means knowing the target device's full
@@ -201,17 +220,38 @@ for legitimate use, or that something is trying commands it shouldn't.
 
 This is a rudimentary safeguard, not a hardened security boundary:
 
+- **The proxy only protects traffic that actually flows through it.**
+  Nothing in this tool stops an agent from connecting *directly* to the real
+  device instead, if it can reach that device's SSH port on the network.
+  This is the single most important thing to get right operationally: use a
+  firewall rule, network segmentation, or an ACL on the device itself to
+  ensure the agent's only path to the device is through the proxy. Without
+  that, the proxy is a convenience, not a control.
 - It trusts the allowlist you write. A dangerously broad pattern (`show *`,
   or worse, `*`) provides no protection at all.
+- Host-key pinning (see Authentication above) closes the MITM gap on every
+  connection *after* the first, but the very first connection to a device
+  is trust-on-first-use — if you need a guarantee on that first connection
+  too, pre-seed the pinned key file yourself from an out-of-band-verified
+  fingerprint before starting the proxy.
 - `shell-line` mode's "one command per newline" model assumes the agent
   sends complete lines, not live human keystrokes with editing — it does
   not implement a real terminal line-editor. Anything that looks like
   keystroke-level editing is rejected as malformed rather than
   interpreted, which is safe but means this mode isn't meant for a human
-  typing interactively through it.
+  typing interactively through it. A single line is also capped at 4096
+  bytes without a newline (rejected past that, session stays alive) so a
+  runaway or malicious stream can't grow the proxy's memory unbounded.
 - Command matching operates on plain ASCII/printable text; anything with
   non-printable or non-ASCII bytes is rejected outright rather than
   matched, which is a safe default but can surprise you if a legitimate
-  command genuinely needs non-ASCII input.
+  command genuinely needs non-ASCII input. Incidental leading/trailing
+  spaces are trimmed before matching, but nothing else is normalized.
 - The proxy protects against *which commands run*, not what their output
   contains — it does not redact or filter anything a device sends back.
+- Passwords are never written to disk or logged, but like any process
+  handling plaintext credentials in memory, a memory dump of a running
+  proxy process could in principle recover a password used in an active
+  session. There's no secure-memory handling here — treat the host running
+  the proxy with the same care you'd give any machine that briefly holds
+  real device credentials.

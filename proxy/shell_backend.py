@@ -18,6 +18,7 @@ from .audit import log_command
 from .config import DeviceConfig
 
 _TAIL_KEEP = 256
+_MAX_LINE_LENGTH = 4096  # bound memory growth if the agent never sends a newline
 
 
 def _drain_until_idle(channel, idle_seconds: float = 3.0, max_seconds: float = 15.0) -> bytes:
@@ -113,6 +114,9 @@ class ShellLineSession:
                     raw_line = bytes(buffer[:idx])
                     del buffer[: idx + 1]
                     self._handle_line(raw_line)
+                if len(buffer) > _MAX_LINE_LENGTH:
+                    self._reject_overlong_buffer(len(buffer))
+                    buffer.clear()
         finally:
             self._stop.set()
             for chan in (self.device_channel, self.agent_channel):
@@ -124,12 +128,21 @@ class ShellLineSession:
 
     def _handle_line(self, raw_line: bytes) -> None:
         line = raw_line.rstrip(b"\r").decode("utf-8", errors="replace")
-        allowed, reason = check_command(line, self.device_cfg.allow, self.device_cfg.mode)
-        log_command(self.audit_logger, self.peer, self.username, line, allowed, reason)
+        # Strip incidental leading/trailing spaces before matching/forwarding.
+        # An agent that pastes "show clock " or " show clock" means exactly
+        # the allowlisted command; the outer spaces carry no security meaning
+        # of their own. This only ever removes literal " " characters at the
+        # two ends, so it cannot hide a control/escape byte from
+        # is_well_formed() (which still sees it if present) and cannot change
+        # whether any guarded metacharacter appears elsewhere in the string --
+        # it's a pure usability normalization, not a widening of what matches.
+        command = line.strip(" ")
+        allowed, reason = check_command(command, self.device_cfg.allow, self.device_cfg.mode)
+        log_command(self.audit_logger, self.peer, self.username, command, allowed, reason)
 
         if allowed:
             try:
-                self.device_channel.sendall(line.encode("utf-8") + b"\n")
+                self.device_channel.sendall(command.encode("utf-8") + b"\n")
             except Exception:
                 self._stop.set()
             return
@@ -141,6 +154,15 @@ class ShellLineSession:
             + b" ***\r\n"
             + self._prompt_guess()
         )
+        try:
+            self.agent_channel.sendall(message)
+        except Exception:
+            self._stop.set()
+
+    def _reject_overlong_buffer(self, buffered_len: int) -> None:
+        reason = f"line exceeds maximum length of {_MAX_LINE_LENGTH} bytes without a newline"
+        log_command(self.audit_logger, self.peer, self.username, f"<discarded, {buffered_len} bytes>", False, reason)
+        message = b"\r\n*** blocked by proxy policy: " + reason.encode() + b" ***\r\n" + self._prompt_guess()
         try:
             self.agent_channel.sendall(message)
         except Exception:
